@@ -1,7 +1,8 @@
 using System;
 using System.IO;
+using System.Xml;
+using System.Linq;
 
-// Unity 的 LightType Enum，我們在這裡複製一份以供顯示
 public enum UnityLightType { Spot, Directional, Point, Area }
 public enum RepeatMode { None, All, Select }
 
@@ -21,7 +22,6 @@ public static class ParserUtils
         _ => "未知"
     };
 
-    // ... (其他無需修改的函式保持原樣) ...
     public static void LoadChangeAmount(BinaryReader reader, string indent = "")
     {
         Console.WriteLine($"{indent}位置: ({reader.ReadSingle():F2}, {reader.ReadSingle():F2}, {reader.ReadSingle():F2})");
@@ -97,13 +97,6 @@ public static class ParserUtils
         Console.WriteLine($"  視野(FOV): {fov:F2}");
     }
 
-    // =======================================================
-    // ==== 以下為基於原始碼 CameraLightCtrl.cs 的最終修正 ====
-    // =======================================================
-
-    /// <summary>
-    /// 根據 CameraLightCtrl.LightInfo 原始碼重寫
-    /// </summary>
     public static void LoadCharaLight(BinaryReader reader)
     {
         Console.WriteLine("--- 角色光照 ---");
@@ -114,19 +107,14 @@ public static class ParserUtils
         Console.WriteLine($"  啟用陰影: {reader.ReadBoolean()}");
     }
 
-    /// <summary>
-    /// 根據 CameraLightCtrl.MapLightInfo 原始碼重寫
-    /// </summary>
     public static void LoadMapLight(BinaryReader reader)
     {
         Console.WriteLine("--- 地圖光照 ---");
-        // 首先讀取基礎 LightInfo 的部分
         Console.WriteLine($"  顏色(Json): {ReadNetString(reader)}");
         Console.WriteLine($"  強度: {reader.ReadSingle():F2}");
         Console.WriteLine($"  X軸旋轉: {reader.ReadSingle():F2}");
         Console.WriteLine($"  Y軸旋轉: {reader.ReadSingle():F2}");
         Console.WriteLine($"  啟用陰影: {reader.ReadBoolean()}");
-        // 然後讀取 MapLightInfo 額外的部分
         Console.WriteLine($"  光源類型: {(UnityLightType)reader.ReadInt32()}");
     }
 
@@ -145,8 +133,51 @@ public static class ParserUtils
         }
     }
 
-    // ---以下基本上永遠維持不變除非有bug------------------------------------------------
-    // 傾印 Hex 數據 (用於偵錯)
+    public static void PrintXmlNode(XmlNode node, int indentLevel)
+    {
+        string indent = new string(' ', indentLevel * 2);
+
+        var attributes = node.Attributes?.Cast<XmlAttribute>()
+                                        .Select(attr => $"{attr.Name}=\"{attr.Value}\"")
+                                        ?? Enumerable.Empty<string>();
+
+        string attributeString = string.Join(" ", attributes);
+
+        if (!node.HasChildNodes)
+        {
+            // 如果節點沒有子節點，則印出一個自我關閉的標籤。
+            Console.WriteLine($"{indent}<{node.Name} {attributeString} />");
+        }
+        else
+        {
+            // 如果有子節點，則印出開頭標籤。
+            Console.WriteLine($"{indent}<{node.Name} {attributeString}>");
+
+            foreach (XmlNode child in node.ChildNodes)
+            {
+                if (child.NodeType == XmlNodeType.Element)
+                {
+                    // 遞迴呼叫以處理子元素。
+                    PrintXmlNode(child, indentLevel + 1);
+                }
+                else if (child.NodeType == XmlNodeType.Text && !string.IsNullOrWhiteSpace(child.Value))
+                {
+                    string textIndent = new string(' ', (indentLevel + 1) * 2);
+                    Console.WriteLine($"{textIndent}{child.Value.Trim()}");
+                }
+                else if (child.NodeType == XmlNodeType.Comment)
+                {
+                    // 同時處理註解節點。
+                    string commentIndent = new string(' ', (indentLevel + 1) * 2);
+                    Console.WriteLine($"{commentIndent}");
+                }
+            }
+
+            // 處理完所有子節點後，印出結尾標籤。
+            Console.WriteLine($"{indent}</{node.Name}>");
+        }
+    }
+
     public static void DumpHexData(BinaryReader reader, int length, string description = "數據")
     {
         long currentPos = reader.BaseStream.Position;
@@ -167,7 +198,6 @@ public static class ParserUtils
         finally { reader.BaseStream.Position = currentPos; }
     }
 
-    // 獲取 PNG 區塊的實際大小
     public static long GetPngSize(Stream stream)
     {
         long originalPos = stream.Position;
@@ -192,14 +222,14 @@ public static class ParserUtils
 
                 if (typeBytes[0] == 'I' && typeBytes[1] == 'E' && typeBytes[2] == 'N' && typeBytes[3] == 'D')
                 {
-                    stream.Seek(chunkLength + 4, SeekOrigin.Current); // Skip data and CRC
+                    stream.Seek(chunkLength + 4, SeekOrigin.Current);
                     return stream.Position - originalPos;
                 }
 
                 if (stream.Length - stream.Position < chunkLength + 4) break;
-                stream.Seek(chunkLength + 4, SeekOrigin.Current); // Skip data and CRC
+                stream.Seek(chunkLength + 4, SeekOrigin.Current);
             }
-            return 0; // IEND chunk not found
+            return 0;
         }
         finally { stream.Seek(originalPos, SeekOrigin.Begin); }
     }

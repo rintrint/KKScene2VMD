@@ -1,12 +1,25 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Xml;
+using MessagePack;
+
+[MessagePackObject]
+public class PluginData
+{
+    [Key(0)]
+    public int version { get; set; }
+    [Key(1)]
+    public Dictionary<string, object> data { get; set; } = new Dictionary<string, object>();
+}
 
 public class Program
 {
     public static void Main(string[] args)
     {
         Console.OutputEncoding = System.Text.Encoding.UTF8;
-        Console.WriteLine("Koikatsu Scene Parser v8.1 (Full Log & Final Logic)");
+        Console.WriteLine("Koikatsu Scene Parser v8.2 (Final Version)");
         Console.WriteLine("====================================================");
 
         if (args.Length == 0) { Console.WriteLine("用法: program.exe \"scene.png\""); return; }
@@ -51,12 +64,16 @@ public class Program
                 ParseSceneData(reader);
             }
 
+            if (reader.BaseStream.Position < reader.BaseStream.Length)
+            {
+                ParseExtendedData(reader);
+            }
+
             Console.WriteLine("\n====================================================");
             Console.WriteLine("場景檔案解析完畢。");
         }
     }
 
-    // 統一的物件解析函式
     static bool ParseAnyObject(BinaryReader reader, Version dataVersion, int depth, int key)
     {
         string indent = new string(' ', depth * 2);
@@ -191,8 +208,6 @@ public class Program
         Console.WriteLine($"線條寬度G: {reader.ReadSingle():F2}");
         Console.WriteLine($"RampG: {reader.ReadInt32()}");
         Console.WriteLine($"環境陰影G: {reader.ReadSingle():F2}");
-
-        // ===== 以下為新增的解析部分 =====
         Console.WriteLine("\n--- 開始解析相機、光照、BGM等數據 ---");
         ParserUtils.LoadCameraData(reader, "主相機數據 (cameraSaveData)");
         for (int i = 0; i < 10; i++)
@@ -207,12 +222,74 @@ public class Program
         Console.WriteLine("\n--- 其他場景設定 ---");
         Console.WriteLine($"背景圖片: '{ParserUtils.ReadNetString(reader)}'");
         Console.WriteLine($"前景框架: '{ParserUtils.ReadNetString(reader)}'");
-
-        // 檢查檔案結尾標記
         if (reader.BaseStream.Position < reader.BaseStream.Length)
         {
             string endTag = ParserUtils.ReadNetString(reader);
             Console.WriteLine($"檔案結束標記: '{endTag}'");
+        }
+    }
+
+    static void ParseExtendedData(BinaryReader reader)
+    {
+        Console.WriteLine("\n--- 開始解析擴展插件數據 (ExtensibleSaveFormat) ---");
+        try
+        {
+            if (reader.BaseStream.Position >= reader.BaseStream.Length)
+            {
+                Console.WriteLine("未發現擴展數據。");
+                return;
+            }
+
+            const string ExpectedMarker = "KKEx";
+            string marker = ParserUtils.ReadNetString(reader);
+
+            if (marker != ExpectedMarker)
+            {
+                Console.WriteLine($"錯誤: 擴展數據標記不符。預期: '{ExpectedMarker}', 實際: '{marker}'。解析終止。");
+                return;
+            }
+            Console.WriteLine($"成功識別擴展數據標記: '{marker}'");
+
+            int esVersion = reader.ReadInt32();
+            int dataLength = reader.ReadInt32();
+            Console.WriteLine($"擴展數據版本: {esVersion}, 數據塊長度: {dataLength} bytes");
+
+            byte[] allPluginBytes = reader.ReadBytes(dataLength);
+            var allPluginsData = MessagePackSerializer.Deserialize<Dictionary<string, PluginData>>(allPluginBytes);
+
+            Console.WriteLine($"\n在擴展數據中發現 {allPluginsData.Count} 個插件的數據，列表如下：");
+            int pluginIndex = 1;
+            foreach (var pluginId in allPluginsData.Keys)
+            {
+                Console.WriteLine($"  {pluginIndex++}. {pluginId}");
+            }
+
+            if (allPluginsData.TryGetValue("timeline", out var timelinePluginData))
+            {
+                Console.WriteLine("\n--- 成功找到 Timeline 插件數據 ---");
+                Console.WriteLine($"  Timeline數據版本: {timelinePluginData.version}");
+
+                if (timelinePluginData.data.TryGetValue("sceneInfo", out var sceneInfoObject) && sceneInfoObject is string xmlString)
+                {
+                    Console.WriteLine("  成功提取 Timeline XML 動畫數據，結構如下：\n");
+                    XmlDocument xmlDoc = new XmlDocument();
+                    xmlDoc.LoadXml(xmlString);
+
+                    if (xmlDoc.DocumentElement != null)
+                    {
+                        ParserUtils.PrintXmlNode(xmlDoc.DocumentElement, 2);
+                    }
+                }
+                else
+                {
+                    Console.WriteLine("  未在 Timeline 數據中找到 'sceneInfo' XML 字串。");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"解析擴展數據時發生錯誤: {ex.Message}");
+            Console.WriteLine(ex.StackTrace);
         }
     }
 }
