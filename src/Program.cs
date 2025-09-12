@@ -1,9 +1,7 @@
-﻿using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
+﻿using MessagePack;
+using System.Globalization;
+using System.Numerics;
 using System.Xml;
-using MessagePack;
 
 [MessagePackObject]
 public class PluginData
@@ -22,15 +20,19 @@ public class Program
         Console.WriteLine("Koikatsu Scene Parser v8.2 (Final Version)");
         Console.WriteLine("====================================================");
 
-        if (args.Length == 0) { Console.WriteLine("用法: program.exe \"scene.png\""); return; }
+        if (args.Length == 0) { Console.WriteLine("用法: KKScene2VMD.exe \"scene.png\""); return; }
         string filePath = args[0];
         if (!File.Exists(filePath)) { Console.WriteLine($"檔案不存在: {filePath}"); return; }
 
-        try { ParseScene(filePath); }
+        try
+        {
+            string vmdPath = Path.ChangeExtension(filePath, ".vmd");
+            ParseScene(filePath, vmdPath);
+        }
         catch (Exception ex) { Console.WriteLine($"錯誤: {ex.Message}\n{ex.StackTrace}"); }
     }
 
-    static void ParseScene(string filePath)
+    static void ParseScene(string filePath, string vmdPath)
     {
         using (FileStream fs = new FileStream(filePath, FileMode.Open, FileAccess.Read))
         using (BinaryReader reader = new BinaryReader(fs))
@@ -66,7 +68,7 @@ public class Program
 
             if (reader.BaseStream.Position < reader.BaseStream.Length)
             {
-                ParseExtendedData(reader);
+                ParseExtendedData(reader, vmdPath);
             }
 
             Console.WriteLine("\n====================================================");
@@ -229,7 +231,7 @@ public class Program
         }
     }
 
-    static void ParseExtendedData(BinaryReader reader)
+    static void ParseExtendedData(BinaryReader reader, string vmdPath)
     {
         Console.WriteLine("\n--- 開始解析擴展插件數據 (ExtensibleSaveFormat) ---");
         try
@@ -278,6 +280,18 @@ public class Program
                     if (xmlDoc.DocumentElement != null)
                     {
                         ParserUtils.PrintXmlNode(xmlDoc.DocumentElement, 2);
+
+                        // *** VMD EXPORT CALL ***
+                        Console.WriteLine("\n--- 開始導出 VMD 動畫數據 ---");
+                        try
+                        {
+                            GenerateAndExportVmd(xmlDoc, vmdPath);
+                            Console.WriteLine($"成功導出 VMD 檔案: {vmdPath}");
+                        }
+                        catch (Exception vmdEx)
+                        {
+                            Console.WriteLine($"導出 VMD 時發生嚴重錯誤: {vmdEx.Message}\n{vmdEx.StackTrace}");
+                        }
                     }
                 }
                 else
@@ -290,6 +304,163 @@ public class Program
         {
             Console.WriteLine($"解析擴展數據時發生錯誤: {ex.Message}");
             Console.WriteLine(ex.StackTrace);
+        }
+    }
+
+    static void GenerateAndExportVmd(XmlDocument xmlDoc, string vmdPath)
+    {
+        var framesByObject = new Dictionary<string, Dictionary<string, SortedDictionary<uint, VmdMotionFrame>>>();
+        const float FPS = 30.0f;
+
+        XmlNodeList? trackNodes = xmlDoc.SelectNodes("/root/interpolable");
+        if (trackNodes == null || trackNodes.Count == 0)
+        {
+            Console.WriteLine("警告: Timeline XML 中未找到任何動畫軌道(interpolable)。");
+            return;
+        }
+
+        foreach (XmlNode trackNode in trackNodes)
+        {
+            string? objectIndex = trackNode.Attributes?["objectIndex"]?.Value;
+            // 如果這條軌道沒有指定物件，或者不包含骨骼資訊，則跳過
+            if (string.IsNullOrEmpty(objectIndex)) continue;
+
+            string? id = trackNode.Attributes?["id"]?.Value;
+            string? owner = trackNode.Attributes?["owner"]?.Value;
+
+            // 只處理跟骨骼位置和旋轉相關的軌道
+            bool isBoneTrack = id == "guideObjectPos" || id == "guideObjectRot" || (owner == "KKPE" && id == "boneRot");
+            if (!isBoneTrack) continue;
+
+            string? kkBoneName = owner == "KKPE"
+                ? trackNode.Attributes?["parameter"]?.Value
+                : trackNode.Attributes?["guideObjectPath"]?.Value;
+
+            if (kkBoneName is null || !BoneMapper.TryGetMmdBone(kkBoneName, out string? mmdBoneName)) continue;
+
+            // --- 將幀數據存入對應 objectIndex 的巢狀字典中 ---
+            // 確保該 objectIndex 的字典存在
+            if (!framesByObject.ContainsKey(objectIndex))
+            {
+                framesByObject[objectIndex] = new Dictionary<string, SortedDictionary<uint, VmdMotionFrame>>();
+            }
+            var objectFrames = framesByObject[objectIndex];
+
+            // 確保該骨骼的 SortedDictionary 存在
+            if (!objectFrames.ContainsKey(mmdBoneName))
+            {
+                objectFrames[mmdBoneName] = new SortedDictionary<uint, VmdMotionFrame>();
+            }
+            var boneFrames = objectFrames[mmdBoneName];
+
+            var keyframeNodes = trackNode.SelectNodes("keyframe");
+            if (keyframeNodes is null) continue;
+
+            foreach (XmlNode keyframeNode in keyframeNodes)
+            {
+                try
+                {
+                    string? timeValue = keyframeNode.Attributes?["time"]?.Value;
+                    if (timeValue is null) continue;
+
+                    float time = float.Parse(timeValue, CultureInfo.InvariantCulture);
+                    uint frameNum = (uint)Math.Round(time * FPS);
+
+                    if (!boneFrames.ContainsKey(frameNum)) boneFrames[frameNum] = new VmdMotionFrame(mmdBoneName, frameNum);
+                    var frame = boneFrames[frameNum];
+
+                    if (id == "guideObjectPos")
+                    {
+                        float x = float.Parse(keyframeNode.Attributes?["valueX"]?.Value!, CultureInfo.InvariantCulture);
+                        float y = float.Parse(keyframeNode.Attributes?["valueY"]?.Value!, CultureInfo.InvariantCulture);
+                        float z = float.Parse(keyframeNode.Attributes?["valueZ"]?.Value!, CultureInfo.InvariantCulture);
+                        x *= 12.5f;
+                        y *= 12.5f;
+                        z *= 12.5f;
+                        frame.Position = new Vector3(-x, y, -z); // 坐標系轉換
+                    }
+                    else if (id == "guideObjectRot" || (owner == "KKPE" && id == "boneRot"))
+                    {
+                        float x = float.Parse(keyframeNode.Attributes?["valueX"]?.Value!, CultureInfo.InvariantCulture);
+                        float y = float.Parse(keyframeNode.Attributes?["valueY"]?.Value!, CultureInfo.InvariantCulture);
+                        float z = float.Parse(keyframeNode.Attributes?["valueZ"]?.Value!, CultureInfo.InvariantCulture);
+                        float w = float.Parse(keyframeNode.Attributes?["valueW"]?.Value!, CultureInfo.InvariantCulture);
+                        frame.Rotation = new Quaternion(-x, y, -z, w); // 坐標系轉換
+                    }
+                }
+                catch (Exception)
+                {
+                    /* 忽略任何解析失敗 (缺少value或格式錯誤) 的keyframe */
+                }
+            }
+        }
+
+        if (framesByObject.Count == 0)
+        {
+            Console.WriteLine("警告: 未能從XML中解析出任何有效的骨骼關鍵幀。");
+            return;
+        }
+
+        // --- 遍歷每個物件並單獨導出 VMD 檔案 ---
+        string baseName = Path.GetFileNameWithoutExtension(vmdPath); // e.g., "scene"
+        string? directory = Path.GetDirectoryName(vmdPath); // e.g., "C:\path\to"
+
+        foreach (var objectEntry in framesByObject)
+        {
+            string objectIndex = objectEntry.Key;
+            var allFramesForObject = objectEntry.Value;
+
+            // 為每個物件構造新的檔名, e.g., "C:\path\to\scene_0.vmd"
+            string newVmdPath = Path.Combine(directory ?? "", $"{baseName}_{objectIndex}.vmd");
+
+            List<VmdMotionFrame> flattenedFrames = new List<VmdMotionFrame>();
+            foreach (var boneTimeline in allFramesForObject.Values)
+            {
+                Vector3? lastPos = null;
+                Quaternion? lastRot = null;
+
+                bool hasAnyPosition = boneTimeline.Values.Any(f => f.Position.HasValue);
+                bool hasAnyRotation = boneTimeline.Values.Any(f => f.Rotation.HasValue);
+
+                if (!hasAnyPosition && !hasAnyRotation) continue;
+
+                foreach (var frame in boneTimeline.Values)
+                {
+                    if (frame.Position == null)
+                    {
+                        frame.Position = hasAnyPosition ? lastPos : Vector3.Zero;
+                    }
+                    else
+                    {
+                        lastPos = frame.Position;
+                    }
+
+                    if (frame.Rotation == null)
+                    {
+                        frame.Rotation = hasAnyRotation ? lastRot : Quaternion.Identity;
+                    }
+                    else
+                    {
+                        lastRot = frame.Rotation;
+                    }
+
+                    if (frame.Position == null) frame.Position = Vector3.Zero;
+                    if (frame.Rotation == null) frame.Rotation = Quaternion.Identity;
+
+                    flattenedFrames.Add(frame);
+                }
+            }
+
+            if (flattenedFrames.Count == 0)
+            {
+                Console.WriteLine($"警告: 物件 {objectIndex} 未解析出任何有效的骨骼關鍵幀，已跳過。");
+                continue;
+            }
+
+            VmdExporter exporter = new VmdExporter();
+            exporter.MotionFrames.AddRange(flattenedFrames.OrderBy(f => f.FrameNumber).ThenBy(f => f.BoneName));
+            exporter.Write(newVmdPath);
+            Console.WriteLine($"成功為物件 {objectIndex} 導出 VMD 檔案: {newVmdPath}");
         }
     }
 }

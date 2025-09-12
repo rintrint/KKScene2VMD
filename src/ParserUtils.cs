@@ -1,7 +1,4 @@
-using System;
-using System.IO;
 using System.Xml;
-using System.Linq;
 
 public enum UnityLightType { Spot, Directional, Point, Area }
 public enum RepeatMode { None, All, Select }
